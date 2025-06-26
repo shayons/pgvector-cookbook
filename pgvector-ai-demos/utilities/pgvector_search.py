@@ -1,406 +1,331 @@
-import numpy as np
+"""
+Core search functionality using pgvector with Aurora PostgreSQL
+"""
+import os
 import json
-from sqlalchemy import create_engine, text, and_, or_
-from sqlalchemy.orm import sessionmaker
+import numpy as np
+from typing import List, Dict, Any, Optional
 import streamlit as st
-from typing import List, Dict, Any, Optional, Tuple
-import asyncio
-import asyncpg
-from pgvector_db_setup import get_db_connection, DB_CONFIG
+from pgvector_db_setup import get_db_connection
+from utilities.invoke_models import invoke_model, invoke_model_mm
+import logging
 
-class PGVectorSearch:
+logger = logging.getLogger(__name__)
+
+class PgVectorSearch:
+    """Main search class for pgvector operations"""
+    
     def __init__(self):
-        self.engine = get_db_connection()
-        
-    def keyword_search(self, query: str, index_name: str = 'products', 
-                      filters: Optional[Dict] = None, size: int = 10) -> List[Dict]:
-        """Perform keyword search using PostgreSQL full-text search"""
-        with self.engine.connect() as conn:
-            # Build the base query
-            if index_name == 'products':
-                base_query = """
-                    SELECT *, 
-                           ts_rank(to_tsvector('english', product_description), 
-                                  plainto_tsquery('english', :query)) as score
-                    FROM products
-                    WHERE to_tsvector('english', product_description) @@ plainto_tsquery('english', :query)
-                          OR to_tsvector('english', caption) @@ plainto_tsquery('english', :query)
-                """
-            else:  # RAG documents
-                base_query = """
-                    SELECT *, 
-                           ts_rank(to_tsvector('english', processed_element), 
-                                  plainto_tsquery('english', :query)) as score
-                    FROM rag_documents
-                    WHERE index_name = :index_name
-                          AND to_tsvector('english', processed_element) @@ plainto_tsquery('english', :query)
-                """
-            
-            # Add filters
-            filter_conditions = []
-            params = {'query': query}
-            
-            if index_name != 'products':
-                params['index_name'] = index_name
-            
-            if filters:
-                for key, value in filters.items():
-                    if key == 'category' and value:
-                        filter_conditions.append("category = :category")
-                        params['category'] = value
-                    elif key == 'gender_affinity' and value:
-                        filter_conditions.append("gender_affinity = :gender")
-                        params['gender'] = value
-                    elif key == 'price' and value:
-                        if isinstance(value, dict):
-                            if 'gte' in value:
-                                filter_conditions.append("price >= :price_gte")
-                                params['price_gte'] = value['gte']
-                            if 'lte' in value:
-                                filter_conditions.append("price <= :price_lte")
-                                params['price_lte'] = value['lte']
-            
-            if filter_conditions:
-                base_query += " AND " + " AND ".join(filter_conditions)
-            
-            base_query += " ORDER BY score DESC LIMIT :size"
-            params['size'] = size
-            
-            result = conn.execute(text(base_query), params)
-            
-            # Format results
-            hits = []
-            for row in result:
-                hit = {
-                    '_id': str(row.id),
-                    '_score': float(row.score) if row.score else 0.0,
-                    '_source': dict(row._mapping)
-                }
-                # Remove internal fields
-                hit['_source'].pop('id', None)
-                hit['_source'].pop('score', None)
-                hits.append(hit)
-            
-            return hits
+        self.conn = None
+        self.connect()
     
-    def vector_search(self, query_vector: List[float], index_name: str = 'products',
-                     vector_field: str = 'description_vector', filters: Optional[Dict] = None,
-                     size: int = 10) -> List[Dict]:
+    def connect(self):
+        """Establish database connection"""
+        self.conn = get_db_connection()
+        if not self.conn:
+            st.error("Failed to connect to database")
+    
+    def ensure_connection(self):
+        """Ensure database connection is active"""
+        if not self.conn or self.conn.closed:
+            self.connect()
+    
+    def vector_search(self, query_text: str, table: str = "products", 
+                     limit: int = 10, similarity_threshold: float = 0.7) -> List[Dict]:
         """Perform vector similarity search"""
-        with self.engine.connect() as conn:
-            # Convert query vector to PostgreSQL array format
-            vector_str = f"[{','.join(map(str, query_vector))}]"
+        self.ensure_connection()
+        if not self.conn:
+            return []
+        
+        try:
+            # Generate embedding for query
+            query_embedding = invoke_model(query_text)
+            if not query_embedding:
+                return []
             
-            # Build the base query
-            if index_name == 'products':
-                base_query = f"""
-                    SELECT *, 
-                           1 - ({vector_field} <=> :query_vector::vector) as score
-                    FROM products
-                    WHERE {vector_field} IS NOT NULL
+            with self.conn.cursor() as cur:
+                # Vector similarity search with cosine distance
+                sql = f"""
+                    SELECT id, title, description, price, category, style, color, 
+                           gender_affinity, image_url, metadata,
+                           1 - (embedding <=> %s) as similarity_score
+                    FROM {table}
+                    WHERE 1 - (embedding <=> %s) > %s
+                    ORDER BY embedding <=> %s
+                    LIMIT %s;
                 """
-            else:  # RAG documents
-                vector_field = 'processed_element_embedding' if 'multimodal' not in vector_field else 'multimodal_embedding'
-                base_query = f"""
-                    SELECT *, 
-                           1 - ({vector_field} <=> :query_vector::vector) as score
-                    FROM rag_documents
-                    WHERE index_name = :index_name
-                          AND {vector_field} IS NOT NULL
-                """
-            
-            # Add filters (same as keyword search)
-            filter_conditions = []
-            params = {'query_vector': vector_str}
-            
-            if index_name != 'products':
-                params['index_name'] = index_name
-            
-            if filters:
-                for key, value in filters.items():
-                    if key == 'category' and value:
-                        filter_conditions.append("category = :category")
-                        params['category'] = value
-                    elif key == 'gender_affinity' and value:
-                        filter_conditions.append("gender_affinity = :gender")
-                        params['gender'] = value
-                    elif key == 'price' and value:
-                        if isinstance(value, dict):
-                            if 'gte' in value:
-                                filter_conditions.append("price >= :price_gte")
-                                params['price_gte'] = value['gte']
-                            if 'lte' in value:
-                                filter_conditions.append("price <= :price_lte")
-                                params['price_lte'] = value['lte']
-            
-            if filter_conditions:
-                base_query += " AND " + " AND ".join(filter_conditions)
-            
-            base_query += " ORDER BY score DESC LIMIT :size"
-            params['size'] = size
-            
-            result = conn.execute(text(base_query), params)
-            
-            # Format results
-            hits = []
-            for row in result:
-                hit = {
-                    '_id': str(row.id),
-                    '_score': float(row.score) if row.score else 0.0,
-                    '_source': dict(row._mapping)
-                }
-                # Remove internal fields
-                hit['_source'].pop('id', None)
-                hit['_source'].pop('score', None)
-                hit['_source'].pop(vector_field, None)
-                hits.append(hit)
-            
-            return hits
+                
+                cur.execute(sql, (query_embedding, query_embedding, 
+                                similarity_threshold, query_embedding, limit))
+                results = cur.fetchall()
+                
+                return [dict(row) for row in results]
+                
+        except Exception as e:
+            logger.error(f"Vector search error: {e}")
+            st.error(f"Search error: {e}")
+            return []
     
-    def sparse_search(self, sparse_vector: Dict[str, float], index_name: str = 'products',
-                     min_score: float = 0.5, filters: Optional[Dict] = None,
-                     size: int = 10) -> List[Dict]:
-        """Perform sparse vector search using JSONB"""
-        with self.engine.connect() as conn:
-            # Filter sparse vector by minimum score
-            filtered_sparse = {k: v for k, v in sparse_vector.items() if v >= min_score}
+    def multimodal_search(self, query_text: str = "", query_image: str = "", 
+                         table: str = "products", limit: int = 10) -> List[Dict]:
+        """Perform multimodal search with text and/or image"""
+        self.ensure_connection()
+        if not self.conn:
+            return []
+        
+        try:
+            # Generate multimodal embedding
+            query_embedding = invoke_model_mm(query_text, query_image if query_image else 'none')
+            if not query_embedding:
+                return []
             
-            # Build the query
-            if index_name == 'products':
-                # Calculate dot product using JSONB
-                sparse_keys = list(filtered_sparse.keys())
-                score_calculation = " + ".join([
-                    f"COALESCE((sparse_vector->>'{k}')::float * {v}, 0)"
-                    for k, v in filtered_sparse.items()
-                ])
-                
-                base_query = f"""
-                    SELECT *, 
-                           ({score_calculation}) as score
-                    FROM products
-                    WHERE sparse_vector IS NOT NULL
-                          AND sparse_vector ?| ARRAY[:sparse_keys]
+            with self.conn.cursor() as cur:
+                sql = f"""
+                    SELECT id, title, description, price, category, style, color,
+                           gender_affinity, image_url, metadata,
+                           1 - (multimodal_embedding <=> %s) as similarity_score
+                    FROM {table}
+                    WHERE multimodal_embedding IS NOT NULL
+                    ORDER BY multimodal_embedding <=> %s
+                    LIMIT %s;
                 """
-                params = {'sparse_keys': sparse_keys}
-            else:
-                # Similar for RAG documents
-                sparse_keys = list(filtered_sparse.keys())
-                score_calculation = " + ".join([
-                    f"COALESCE((processed_element_embedding_sparse->>'{k}')::float * {v}, 0)"
-                    for k, v in filtered_sparse.items()
-                ])
                 
-                base_query = f"""
-                    SELECT *, 
-                           ({score_calculation}) as score
-                    FROM rag_documents
-                    WHERE index_name = :index_name
-                          AND processed_element_embedding_sparse IS NOT NULL
-                          AND processed_element_embedding_sparse ?| ARRAY[:sparse_keys]
-                """
-                params = {'index_name': index_name, 'sparse_keys': sparse_keys}
-            
-            # Add filters
-            if filters:
-                filter_conditions = []
-                for key, value in filters.items():
-                    if key == 'category' and value:
-                        filter_conditions.append("category = :category")
-                        params['category'] = value
-                    elif key == 'gender_affinity' and value:
-                        filter_conditions.append("gender_affinity = :gender")
-                        params['gender'] = value
-                    elif key == 'price' and value:
-                        if isinstance(value, dict):
-                            if 'gte' in value:
-                                filter_conditions.append("price >= :price_gte")
-                                params['price_gte'] = value['gte']
-                            if 'lte' in value:
-                                filter_conditions.append("price <= :price_lte")
-                                params['price_lte'] = value['lte']
+                cur.execute(sql, (query_embedding, query_embedding, limit))
+                results = cur.fetchall()
                 
-                if filter_conditions:
-                    base_query += " AND " + " AND ".join(filter_conditions)
-            
-            base_query += " ORDER BY score DESC LIMIT :size"
-            params['size'] = size
-            
-            result = conn.execute(text(base_query), params)
-            
-            # Format results
-            hits = []
-            for row in result:
-                hit = {
-                    '_id': str(row.id),
-                    '_score': float(row.score) if row.score else 0.0,
-                    '_source': dict(row._mapping)
-                }
-                # Remove internal fields
-                hit['_source'].pop('id', None)
-                hit['_source'].pop('score', None)
+                return [dict(row) for row in results]
                 
-                # Add sparse vector info
-                if index_name == 'products' and row.sparse_vector:
-                    hit['_source']['sparse'] = row.sparse_vector
-                
-                hits.append(hit)
-            
-            return hits
+        except Exception as e:
+            logger.error(f"Multimodal search error: {e}")
+            st.error(f"Multimodal search error: {e}")
+            return []
     
-    def hybrid_search(self, query: str, query_vectors: Dict[str, List[float]], 
-                     sparse_vector: Optional[Dict[str, float]] = None,
-                     weights: Dict[str, float] = None, index_name: str = 'products',
-                     filters: Optional[Dict] = None, size: int = 10) -> List[Dict]:
+    def keyword_search(self, query_text: str, table: str = "products", 
+                      limit: int = 10) -> List[Dict]:
+        """Perform full-text search"""
+        self.ensure_connection()
+        if not self.conn:
+            return []
+        
+        try:
+            with self.conn.cursor() as cur:
+                # Full-text search using PostgreSQL's text search
+                sql = f"""
+                    SELECT id, title, description, price, category, style, color,
+                           gender_affinity, image_url, metadata,
+                           ts_rank_cd(to_tsvector('english', title || ' ' || description), 
+                                     plainto_tsquery('english', %s)) as rank
+                    FROM {table}
+                    WHERE to_tsvector('english', title || ' ' || description) @@ 
+                          plainto_tsquery('english', %s)
+                    ORDER BY rank DESC
+                    LIMIT %s;
+                """
+                
+                cur.execute(sql, (query_text, query_text, limit))
+                results = cur.fetchall()
+                
+                return [dict(row) for row in results]
+                
+        except Exception as e:
+            logger.error(f"Keyword search error: {e}")
+            st.error(f"Keyword search error: {e}")
+            return []
+    
+    def hybrid_search(self, query_text: str, weights: Dict[str, float] = None,
+                     table: str = "products", limit: int = 10) -> List[Dict]:
         """Perform hybrid search combining multiple search methods"""
         if weights is None:
-            # Default equal weights
-            num_methods = 1 + len(query_vectors) + (1 if sparse_vector else 0)
-            default_weight = 1.0 / num_methods
-            weights = {
-                'keyword': default_weight,
-                'vector': default_weight,
-                'sparse': default_weight if sparse_vector else 0
+            weights = {"vector": 0.6, "keyword": 0.4}
+        
+        # Perform individual searches
+        vector_results = self.vector_search(query_text, table, limit * 2)
+        keyword_results = self.keyword_search(query_text, table, limit * 2)
+        
+        # Combine and rerank results
+        combined_results = self._combine_search_results(
+            vector_results, keyword_results, weights, limit
+        )
+        
+        return combined_results
+    
+    def _combine_search_results(self, vector_results: List[Dict], 
+                               keyword_results: List[Dict], 
+                               weights: Dict[str, float], limit: int) -> List[Dict]:
+        """Combine multiple search results with weighted scoring"""
+        # Create a mapping of all unique items
+        items = {}
+        
+        # Add vector search results
+        for i, item in enumerate(vector_results):
+            item_id = item['id']
+            vector_score = item.get('similarity_score', 0)
+            items[item_id] = {
+                **item,
+                'vector_score': vector_score,
+                'vector_rank': i + 1,
+                'keyword_score': 0,
+                'keyword_rank': len(vector_results) + 1
             }
         
-        all_results = {}
-        
-        # Keyword search
-        if weights.get('keyword', 0) > 0:
-            keyword_results = self.keyword_search(query, index_name, filters, size * 3)
-            for rank, hit in enumerate(keyword_results):
-                doc_id = hit['_id']
-                if doc_id not in all_results:
-                    all_results[doc_id] = {
-                        'hit': hit,
-                        'scores': {}
-                    }
-                all_results[doc_id]['scores']['keyword'] = 1.0 / (rank + 1)
-        
-        # Vector searches
-        for vector_field, query_vector in query_vectors.items():
-            if weights.get('vector', 0) > 0:
-                vector_results = self.vector_search(
-                    query_vector, index_name, vector_field, filters, size * 3
-                )
-                for rank, hit in enumerate(vector_results):
-                    doc_id = hit['_id']
-                    if doc_id not in all_results:
-                        all_results[doc_id] = {
-                            'hit': hit,
-                            'scores': {}
-                        }
-                    all_results[doc_id]['scores'][f'vector_{vector_field}'] = 1.0 / (rank + 1)
-        
-        # Sparse search
-        if sparse_vector and weights.get('sparse', 0) > 0:
-            sparse_results = self.sparse_search(
-                sparse_vector, index_name, filters=filters, size=size * 3
-            )
-            for rank, hit in enumerate(sparse_results):
-                doc_id = hit['_id']
-                if doc_id not in all_results:
-                    all_results[doc_id] = {
-                        'hit': hit,
-                        'scores': {}
-                    }
-                all_results[doc_id]['scores']['sparse'] = 1.0 / (rank + 1)
-        
-        # Calculate final scores using reciprocal rank fusion
-        final_results = []
-        for doc_id, data in all_results.items():
-            final_score = 0
-            for method, score in data['scores'].items():
-                weight_key = 'keyword' if 'keyword' in method else 'vector' if 'vector' in method else 'sparse'
-                final_score += weights.get(weight_key, 0) * score
+        # Add keyword search results
+        for i, item in enumerate(keyword_results):
+            item_id = item['id']
+            keyword_score = item.get('rank', 0)
             
-            data['hit']['_score'] = final_score
-            final_results.append(data['hit'])
+            if item_id in items:
+                items[item_id]['keyword_score'] = keyword_score
+                items[item_id]['keyword_rank'] = i + 1
+            else:
+                items[item_id] = {
+                    **item,
+                    'vector_score': 0,
+                    'vector_rank': len(keyword_results) + 1,
+                    'keyword_score': keyword_score,
+                    'keyword_rank': i + 1
+                }
         
-        # Sort by final score and return top k
-        final_results.sort(key=lambda x: x['_score'], reverse=True)
-        return final_results[:size]
-    
-    def rerank_results(self, query: str, results: List[Dict], 
-                      reranker_type: str = 'cross_encoder') -> List[Dict]:
-        """Rerank search results using various methods"""
-        if reranker_type == 'none' or not results:
-            return results
-        
-        # This is a placeholder - in production, you'd integrate with actual reranking models
-        # For now, we'll just return the results as-is
-        return results
-    
-    def colbert_search(self, query_tokens: List[str], query_token_vectors: List[List[float]],
-                      product_ids: Optional[List[str]] = None, size: int = 10) -> List[Dict]:
-        """Perform ColBERT-style token-level search"""
-        with self.engine.connect() as conn:
-            final_scores = {}
+        # Calculate combined scores
+        for item_id, item in items.items():
+            # Normalize scores
+            vector_norm = 1 / item['vector_rank'] if item['vector_rank'] > 0 else 0
+            keyword_norm = 1 / item['keyword_rank'] if item['keyword_rank'] > 0 else 0
             
-            # Get all unique product IDs if not provided
-            if not product_ids:
-                result = conn.execute(text("SELECT DISTINCT product_id FROM token_embeddings"))
-                product_ids = [row[0] for row in result]
-            
-            # For each product, calculate MaxSim score
-            for product_id in product_ids:
-                # Get all token embeddings for this product
-                result = conn.execute(
-                    text("SELECT token, embedding FROM token_embeddings WHERE product_id = :pid"),
-                    {'pid': product_id}
-                )
-                
-                doc_tokens = []
-                doc_embeddings = []
-                for row in result:
-                    doc_tokens.append(row[0])
-                    # Parse the vector string back to list
-                    embedding = json.loads(row[1].replace('[', '').replace(']', '').replace(' ', '').split(','))
-                    doc_embeddings.append(embedding)
-                
-                if not doc_embeddings:
-                    continue
-                
-                # Calculate MaxSim score
-                total_score = 0
-                for query_embedding in query_token_vectors:
-                    max_sim = -1
-                    for doc_embedding in doc_embeddings:
-                        # Cosine similarity
-                        sim = np.dot(query_embedding, doc_embedding) / (
-                            np.linalg.norm(query_embedding) * np.linalg.norm(doc_embedding)
-                        )
-                        max_sim = max(max_sim, sim)
-                    total_score += max_sim
-                
-                final_scores[product_id] = total_score
-            
-            # Get top products and their details
-            top_products = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)[:size]
-            
-            # Fetch product details
-            product_ids_str = ','.join([f"'{pid}'" for pid, _ in top_products])
-            result = conn.execute(
-                text(f"SELECT * FROM products WHERE product_id IN ({product_ids_str})")
+            # Weighted combination
+            combined_score = (
+                weights.get('vector', 0.6) * vector_norm +
+                weights.get('keyword', 0.4) * keyword_norm
             )
             
-            products_dict = {row.product_id: row for row in result}
+            item['combined_score'] = combined_score
+        
+        # Sort by combined score and return top results
+        sorted_results = sorted(items.values(), 
+                              key=lambda x: x['combined_score'], 
+                              reverse=True)
+        
+        return sorted_results[:limit]
+    
+    def filtered_search(self, query_text: str, filters: Dict[str, Any], 
+                       search_type: str = "vector", table: str = "products", 
+                       limit: int = 10) -> List[Dict]:
+        """Perform search with metadata filters"""
+        self.ensure_connection()
+        if not self.conn:
+            return []
+        
+        try:
+            # Build filter conditions
+            filter_conditions = []
+            filter_params = []
             
-            # Format results
-            hits = []
-            for product_id, score in top_products:
-                if product_id in products_dict:
-                    row = products_dict[product_id]
-                    hit = {
-                        '_id': str(row.id),
-                        '_score': float(score),
-                        '_source': dict(row._mapping),
-                        'total_score': float(score)
-                    }
-                    # Remove internal fields
-                    hit['_source'].pop('id', None)
-                    hits.append(hit)
+            for key, value in filters.items():
+                if value is not None:
+                    if key == 'price_range':
+                        filter_conditions.append("price BETWEEN %s AND %s")
+                        filter_params.extend([value[0], value[1]])
+                    elif key == 'categories' and isinstance(value, list):
+                        filter_conditions.append(f"category = ANY(%s)")
+                        filter_params.append(value)
+                    else:
+                        filter_conditions.append(f"{key} = %s")
+                        filter_params.append(value)
             
-            return hits
+            filter_clause = ""
+            if filter_conditions:
+                filter_clause = " AND " + " AND ".join(filter_conditions)
+            
+            # Generate query embedding for vector search
+            if search_type == "vector":
+                query_embedding = invoke_model(query_text)
+                if not query_embedding:
+                    return []
+                
+                with self.conn.cursor() as cur:
+                    sql = f"""
+                        SELECT id, title, description, price, category, style, color,
+                               gender_affinity, image_url, metadata,
+                               1 - (embedding <=> %s) as similarity_score
+                        FROM {table}
+                        WHERE embedding IS NOT NULL {filter_clause}
+                        ORDER BY embedding <=> %s
+                        LIMIT %s;
+                    """
+                    
+                    params = [query_embedding] + filter_params + [query_embedding, limit]
+                    cur.execute(sql, params)
+                    results = cur.fetchall()
+                    
+                    return [dict(row) for row in results]
+            
+            elif search_type == "keyword":
+                with self.conn.cursor() as cur:
+                    sql = f"""
+                        SELECT id, title, description, price, category, style, color,
+                               gender_affinity, image_url, metadata,
+                               ts_rank_cd(to_tsvector('english', title || ' ' || description), 
+                                         plainto_tsquery('english', %s)) as rank
+                        FROM {table}
+                        WHERE to_tsvector('english', title || ' ' || description) @@ 
+                              plainto_tsquery('english', %s) {filter_clause}
+                        ORDER BY rank DESC
+                        LIMIT %s;
+                    """
+                    
+                    params = [query_text, query_text] + filter_params + [limit]
+                    cur.execute(sql, params)
+                    results = cur.fetchall()
+                    
+                    return [dict(row) for row in results]
+            
+        except Exception as e:
+            logger.error(f"Filtered search error: {e}")
+            st.error(f"Filtered search error: {e}")
+            return []
+    
+    def get_similar_items(self, item_id: int, table: str = "products", 
+                         limit: int = 5) -> List[Dict]:
+        """Find similar items to a given item"""
+        self.ensure_connection()
+        if not self.conn:
+            return []
+        
+        try:
+            with self.conn.cursor() as cur:
+                # Get the embedding of the reference item
+                cur.execute(f"SELECT embedding FROM {table} WHERE id = %s", (item_id,))
+                result = cur.fetchone()
+                
+                if not result or not result['embedding']:
+                    return []
+                
+                reference_embedding = result['embedding']
+                
+                # Find similar items
+                sql = f"""
+                    SELECT id, title, description, price, category, style, color,
+                           gender_affinity, image_url, metadata,
+                           1 - (embedding <=> %s) as similarity_score
+                    FROM {table}
+                    WHERE id != %s AND embedding IS NOT NULL
+                    ORDER BY embedding <=> %s
+                    LIMIT %s;
+                """
+                
+                cur.execute(sql, (reference_embedding, item_id, reference_embedding, limit))
+                results = cur.fetchall()
+                
+                return [dict(row) for row in results]
+                
+        except Exception as e:
+            logger.error(f"Similar items search error: {e}")
+            st.error(f"Similar items search error: {e}")
+            return []
+    
+    def close(self):
+        """Close database connection"""
+        if self.conn and not self.conn.closed:
+            self.conn.close()
 
-# Singleton instance
-pg_search = PGVectorSearch()
+# Global search instance
+search_engine = PgVectorSearch()
