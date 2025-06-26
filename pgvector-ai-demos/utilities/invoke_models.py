@@ -1,5 +1,5 @@
 """
-Updated invoke_models.py for HF Spaces deployment with environment variables
+Updated invoke_models.py for HF Spaces deployment with us-west-2 region
 """
 import boto3
 import json
@@ -8,37 +8,30 @@ import pandas as pd
 from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 from langchain_community.chat_models import BedrockChat
 import streamlit as st
+import os
 
-region = 'us-east-1'
+region = 'us-west-2'
 
-def get_bedrock_client(region_name='us-west-2'):
-    """Get Bedrock client using environment variables"""
-    if region_name == 'us-west-2':
-        return boto3.client(
-            'bedrock-runtime',
-            aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID_US_WEST_2', os.environ.get('AWS_ACCESS_KEY_ID')),
-            aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY_US_WEST_2', os.environ.get('AWS_SECRET_ACCESS_KEY')),
-            region_name='us-west-2'
-        )
-    else:
-        return boto3.client(
-            'bedrock-runtime',
-            aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
-            aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
-            region_name=region_name
-        )
+def get_bedrock_client():
+    """Get Bedrock client using environment variables (us-west-2)"""
+    return boto3.client(
+        'bedrock-runtime',
+        aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+        aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
+        region_name='us-west-2'
+    )
 
 def get_sagemaker_client():
-    """Get SageMaker runtime client"""
+    """Get SageMaker runtime client (us-west-2)"""
     return boto3.client(
         'sagemaker-runtime',
         aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
         aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
-        region_name='us-east-1'
+        region_name='us-west-2'
     )
 
 # Initialize clients
-bedrock_runtime_client = get_bedrock_client('us-west-2')
+bedrock_runtime_client = get_bedrock_client()
 sagemaker_runtime = get_sagemaker_client()
 
 def invoke_model(input_text):

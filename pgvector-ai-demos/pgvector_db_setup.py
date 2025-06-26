@@ -5,6 +5,8 @@ import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import streamlit as st
+import os
+import os
 from urllib.parse import urlparse
 import logging
 
@@ -219,18 +221,10 @@ def test_connection():
         conn.close()
 
 def get_aws_credentials():
-    """Get AWS credentials from environment variables"""
+    """Get AWS credentials from environment variables (us-west-2)"""
     return {
         'aws_access_key_id': os.environ.get('AWS_ACCESS_KEY_ID'),
         'aws_secret_access_key': os.environ.get('AWS_SECRET_ACCESS_KEY'),
-        'region_name': os.environ.get('AWS_REGION', 'us-east-1')
-    }
-
-def get_aws_credentials_west():
-    """Get AWS credentials for US West 2"""
-    return {
-        'aws_access_key_id': os.environ.get('AWS_ACCESS_KEY_ID_US_WEST_2', os.environ.get('AWS_ACCESS_KEY_ID')),
-        'aws_secret_access_key': os.environ.get('AWS_SECRET_ACCESS_KEY_US_WEST_2', os.environ.get('AWS_SECRET_ACCESS_KEY')),
         'region_name': 'us-west-2'
     }
 

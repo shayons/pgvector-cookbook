@@ -3,11 +3,12 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import streamlit as st
+import os
 import boto3
 import json
 
-runtime = boto3.client('sagemaker-runtime',aws_access_key_id=st.secrets['user_access_key'],
-    aws_secret_access_key=st.secrets['user_secret_key'],region_name='us-east-1')
+runtime = boto3.client('sagemaker-runtime',aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),region_name='us-west-2')
 # Load Tokenizer from HuggingFace Hub
 tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
 endpoint_name = 'all-MiniLM-L6-v2-model'

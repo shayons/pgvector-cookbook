@@ -5,6 +5,7 @@ import time
 import shutil
 from unstructured.partition.pdf import partition_pdf
 import streamlit as st
+import os
 from PIL import Image
 import base64
 import utilities.invoke_models as invoke_models

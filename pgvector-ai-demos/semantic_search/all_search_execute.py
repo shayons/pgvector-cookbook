@@ -7,6 +7,7 @@ import json
 import os
 import uuid
 import streamlit as st
+import os
 from utilities.pgvector_search import pg_search
 import utilities.mvectors as cb
 import utilities.ubi_lambda as ubi

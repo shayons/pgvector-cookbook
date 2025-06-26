@@ -7,6 +7,7 @@ import torch
 import matplotlib.pyplot as plt
 from PIL import Image
 import streamlit as st
+import os
 import boto3
 from typing import List, Dict, Optional
 from pgvector_db_setup import get_db_connection
@@ -25,8 +26,8 @@ REGION = "us-east-1"
 # Initialize SageMaker runtime
 runtime = boto3.client(
     "sagemaker-runtime",
-    aws_access_key_id=st.secrets['user_access_key'],
-    aws_secret_access_key=st.secrets['user_secret_key'],
+    aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
     region_name=REGION
 )
 

@@ -3,6 +3,7 @@ import os
 import sys
 import boto3
 import streamlit as st
+import os
 from langchain.llms.bedrock import Bedrock
 from langchain.chains.query_constructor.base import AttributeInfo
 from langchain_core.prompts.few_shot import FewShotPromptTemplate
@@ -21,7 +22,7 @@ bedrock_params = {
     "stop_sequences": ["\\n\\nHuman:"]
 }
 
-bedrock_region = "us-east-1"
+bedrock_region='us-west-2'
 boto3_bedrock = boto3.client(service_name="bedrock-runtime", region_name=bedrock_region)
 bedrock_llm = Bedrock(model_id="anthropic.claude-instant-v1", client=boto3_bedrock)
 bedrock_llm.model_kwargs = bedrock_params

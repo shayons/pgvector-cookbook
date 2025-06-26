@@ -6,6 +6,7 @@ import json
 import numpy as np
 from typing import List, Dict, Any, Optional
 import streamlit as st
+import os
 from pgvector_db_setup import get_db_connection
 from utilities.invoke_models import invoke_model, invoke_model_mm
 import logging

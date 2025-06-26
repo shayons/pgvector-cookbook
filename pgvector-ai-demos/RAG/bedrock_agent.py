@@ -3,6 +3,7 @@ import json
 import uuid
 import logging
 import streamlit as st
+import os
 from datetime import datetime, timezone
 from pgvector_db_setup import get_db_connection
 from sqlalchemy import text
@@ -19,8 +20,8 @@ logger = logging.getLogger(__name__)
 # Initialize Bedrock client
 bedrock_agent_runtime_client = boto3.client(
     'bedrock-agent-runtime',
-    aws_access_key_id=st.secrets['user_access_key_us_west_2'],
-    aws_secret_access_key=st.secrets['user_secret_key_us_west_2'],
+    aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
     region_name='us-west-2'
 )
 

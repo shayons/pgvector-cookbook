@@ -3,6 +3,7 @@ from datetime import datetime
 from pgvector_db_setup import get_db_connection
 from sqlalchemy import text
 import streamlit as st
+import os
 
 def send_to_lambda(index, document):
     """
